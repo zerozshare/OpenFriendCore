@@ -48,6 +48,9 @@ type Client struct {
 	rpcID     atomic.Int64
 	pendingMu sync.Mutex
 	pending   map[int64]chan json.RawMessage
+
+	readyMu sync.Mutex
+	readyCh chan struct{}
 }
 
 func NewClient(tokens TokenProvider, onJoin FriendJoinListener, logger *slog.Logger) *Client {
@@ -64,6 +67,39 @@ func NewClient(tokens TokenProvider, onJoin FriendJoinListener, logger *slog.Log
 		ctx:       ctx,
 		cancel:    cancel,
 		pending:   map[int64]chan json.RawMessage{},
+		readyCh:   make(chan struct{}),
+	}
+}
+
+func (c *Client) markReady() {
+	c.readyMu.Lock()
+	defer c.readyMu.Unlock()
+	select {
+	case <-c.readyCh:
+	default:
+		close(c.readyCh)
+	}
+}
+
+func (c *Client) resetReady() {
+	c.readyMu.Lock()
+	defer c.readyMu.Unlock()
+	select {
+	case <-c.readyCh:
+		c.readyCh = make(chan struct{})
+	default:
+	}
+}
+
+func (c *Client) WaitReady(ctx context.Context) error {
+	c.readyMu.Lock()
+	ch := c.readyCh
+	c.readyMu.Unlock()
+	select {
+	case <-ch:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
 	}
 }
 

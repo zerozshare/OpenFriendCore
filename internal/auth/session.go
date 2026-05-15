@@ -10,6 +10,7 @@
 package auth
 
 import (
+	"errors"
 	"log/slog"
 	"sync"
 	"time"
@@ -18,6 +19,9 @@ import (
 )
 
 const refreshMargin = 5 * time.Minute
+
+var ErrNotAuthenticated = errors.New("not authenticated")
+var errNoSavedToken = ErrNotAuthenticated
 
 type Session struct {
 	store    *Store
@@ -79,6 +83,71 @@ func (s *Session) deviceCode() (*Tokens, error) {
 	s.tokens = t
 	_ = s.store.Save(t)
 	return t, nil
+}
+
+func (s *Session) SetMojangSession(accessToken string, profileID uuid.UUID, name string, expiresAt time.Time) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.tokens = &Tokens{
+		ProfileID:         profileID,
+		Name:              name,
+		MojangAccessToken: accessToken,
+		MojangExpiresAt:   expiresAt,
+	}
+}
+
+func (s *Session) CurrentProfileID() uuid.UUID {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.tokens == nil {
+		return uuid.Nil
+	}
+	return s.tokens.ProfileID
+}
+
+func (s *Session) ResetCache() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.tokens = nil
+	if s.store != nil {
+		_ = s.store.Save(&Tokens{})
+	}
+}
+
+func (s *Session) EnsureFreshSilent() (*Tokens, error) {
+	s.mu.Lock()
+	t := s.tokens
+	s.mu.Unlock()
+	if t != nil {
+		if time.Now().Before(t.MojangExpiresAt.Add(-refreshMargin)) {
+			return t, nil
+		}
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		if time.Now().Before(s.tokens.MojangExpiresAt.Add(-refreshMargin)) {
+			return s.tokens, nil
+		}
+		nt, err := SilentRefresh(s.tokens.MsRefreshToken)
+		if err != nil {
+			return nil, err
+		}
+		s.tokens = nt
+		_ = s.store.Save(nt)
+		return nt, nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	saved, err := s.store.Load()
+	if err != nil || saved == nil || saved.MsRefreshToken == "" {
+		return nil, errNoSavedToken
+	}
+	nt, err := SilentRefresh(saved.MsRefreshToken)
+	if err != nil {
+		return nil, err
+	}
+	s.tokens = nt
+	_ = s.store.Save(nt)
+	return nt, nil
 }
 
 func (s *Session) EnsureFresh() (*Tokens, error) {

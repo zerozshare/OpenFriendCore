@@ -17,6 +17,12 @@ import (
 
 func (c *Client) GetFriends() (*FriendsListResponse, error) {
 	if c.FriendsInCooldown() {
+		c.mu.Lock()
+		cached := c.friendsCache
+		c.mu.Unlock()
+		if cached != nil {
+			return cached, nil
+		}
 		return nil, &APIError{Op: "GET /friends", Status: 429, Body: "client cooldown"}
 	}
 	c.mu.Lock()
@@ -35,16 +41,26 @@ func (c *Client) GetFriends() (*FriendsListResponse, error) {
 	if err != nil {
 		return nil, err
 	}
-	c.mu.Lock()
-	c.friendsETag = etagOut
-	c.mu.Unlock()
-
 	if status == 304 || len(raw) == 0 {
-		return nil, nil
+		c.mu.Lock()
+		if etagOut != "" {
+			c.friendsETag = etagOut
+		}
+		cached := c.friendsCache
+		c.mu.Unlock()
+		return cached, nil
 	}
 	var out FriendsListResponse
 	if err := json.Unmarshal(raw, &out); err != nil {
 		return nil, err
+	}
+	c.mu.Lock()
+	c.friendsETag = etagOut
+	c.friendsCache = &out
+	dir := c.cacheDir
+	c.mu.Unlock()
+	if dir != "" {
+		c.SaveCacheToDisk(dir)
 	}
 	return &out, nil
 }

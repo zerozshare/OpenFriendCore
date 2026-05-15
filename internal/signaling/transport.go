@@ -97,6 +97,7 @@ func (c *Client) doConnect() error {
 	c.mu.Unlock()
 
 	c.logger.Info("Signaling WebSocket open")
+	c.markReady()
 	go c.readLoop(conn)
 	go c.pingLoop(pingCtx)
 	return nil
@@ -174,5 +175,6 @@ func (c *Client) handleClose(cause error) {
 	}
 	c.ws = nil
 	c.mu.Unlock()
+	c.resetReady()
 	c.scheduleReconnect(cause)
 }

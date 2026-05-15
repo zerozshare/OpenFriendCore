@@ -46,6 +46,9 @@ func NewJoinManager(sig *signaling.Client, peerPmid uuid.UUID, logger *slog.Logg
 		webrtc.NetworkTypeUDP4,
 		webrtc.NetworkTypeUDP6,
 	})
+	// Shorten ICE gathering / disconnect timeouts so Mojang's join handshake
+	// doesn't time out while we wait for slow candidates.
+	se.SetICETimeouts(3*time.Second, 8*time.Second, 1*time.Second)
 	api := webrtc.NewAPI(webrtc.WithSettingEngine(se))
 
 	jm := &JoinManager{
@@ -69,6 +72,13 @@ func (j *JoinManager) Listen(addr string) error {
 	j.logger.Info("Join listener up", "addr", ln.Addr().String(), "peer", j.peerPmid)
 	go j.acceptLoop()
 	return nil
+}
+
+func (j *JoinManager) ListenAddr() string {
+	if j.listener == nil {
+		return ""
+	}
+	return j.listener.Addr().String()
 }
 
 func (j *JoinManager) acceptLoop() {
@@ -117,8 +127,17 @@ func (j *JoinManager) handleIncoming(local net.Conn) {
 
 	j.logger.Info("[join] local client connected", "sid", sid, "addr", local.RemoteAddr())
 
+	waitCtx, waitCancel := context.WithTimeout(context.Background(), 15*time.Second)
+	if err := j.sig.WaitReady(waitCtx); err != nil {
+		waitCancel()
+		j.logger.Warn("Signaling not ready for JOIN_REQUEST", "err", err.Error())
+		_ = local.Close()
+		return
+	}
+	waitCancel()
+
 	if err := j.sig.SendClientMessage(j.peerPmid, signaling.JoinRequest(sid)); err != nil {
-		j.logger.Warn("Failed to send JOIN_REQUEST", "err", err)
+		j.logger.Warn("Failed to send JOIN_REQUEST", "err", err.Error())
 		_ = local.Close()
 		return
 	}

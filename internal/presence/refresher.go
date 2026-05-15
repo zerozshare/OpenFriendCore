@@ -18,17 +18,28 @@ import (
 	"jp.zpw.openfriend/internal/api"
 )
 
+type Observer interface {
+	OnFriendAdded(d api.FriendDto)
+	OnFriendRemoved(id uuid.UUID)
+	OnIncomingRequest(d api.FriendDto)
+	OnIncomingResolved(id uuid.UUID)
+	OnOutgoingRequest(d api.FriendDto)
+	OnOutgoingResolved(id uuid.UUID)
+	OnInitialSnapshot(resp *api.FriendsListResponse)
+}
+
 type Refresher struct {
 	client      *api.Client
 	interval    time.Duration
 	autoAccept  bool
 	logger      *slog.Logger
+	observer    Observer
 
 	mu             sync.Mutex
 	primed         bool
-	knownFriends   map[uuid.UUID]struct{}
-	knownIncoming  map[uuid.UUID]struct{}
-	knownOutgoing  map[uuid.UUID]struct{}
+	knownFriends   map[uuid.UUID]api.FriendDto
+	knownIncoming  map[uuid.UUID]api.FriendDto
+	knownOutgoing  map[uuid.UUID]api.FriendDto
 
 	stop chan struct{}
 	done chan struct{}
@@ -43,10 +54,22 @@ func NewRefresher(client *api.Client, interval time.Duration, autoAccept bool, l
 		interval:      interval,
 		autoAccept:    autoAccept,
 		logger:        logger,
-		knownFriends:  map[uuid.UUID]struct{}{},
-		knownIncoming: map[uuid.UUID]struct{}{},
-		knownOutgoing: map[uuid.UUID]struct{}{},
+		knownFriends:  map[uuid.UUID]api.FriendDto{},
+		knownIncoming: map[uuid.UUID]api.FriendDto{},
+		knownOutgoing: map[uuid.UUID]api.FriendDto{},
 	}
+}
+
+func (r *Refresher) SetObserver(o Observer) {
+	r.mu.Lock()
+	r.observer = o
+	r.mu.Unlock()
+}
+
+func (r *Refresher) SetAutoAccept(v bool) {
+	r.mu.Lock()
+	r.autoAccept = v
+	r.mu.Unlock()
 }
 
 func (r *Refresher) Start() {
@@ -71,6 +94,10 @@ func (r *Refresher) loop() {
 	}
 }
 
+func (r *Refresher) TickNow() {
+	r.tick()
+}
+
 func (r *Refresher) tick() {
 	if r.client.FriendsInCooldown() {
 		r.logger.Debug("Friends tick skipped (cooldown)")
@@ -87,46 +114,63 @@ func (r *Refresher) tick() {
 	r.applyDiff(resp)
 }
 
-func idSet(list []api.FriendDto) map[uuid.UUID]struct{} {
-	m := make(map[uuid.UUID]struct{}, len(list))
+func idMap(list []api.FriendDto) map[uuid.UUID]api.FriendDto {
+	m := make(map[uuid.UUID]api.FriendDto, len(list))
 	for _, d := range list {
-		m[d.ProfileID.UUID()] = struct{}{}
+		m[d.ProfileID.UUID()] = d
 	}
 	return m
 }
 
 func (r *Refresher) applyDiff(resp *api.FriendsListResponse) {
 	r.mu.Lock()
-	defer r.mu.Unlock()
+	obs := r.observer
+	primed := r.primed
+	autoAccept := r.autoAccept
+	prevIncoming := r.knownIncoming
+	prevFriends := r.knownFriends
+	prevOutgoing := r.knownOutgoing
+	r.mu.Unlock()
 
-	curF := idSet(resp.Friends)
-	curIn := idSet(resp.IncomingRequests)
-	curOut := idSet(resp.OutgoingRequests)
+	curF := idMap(resp.Friends)
+	curIn := idMap(resp.IncomingRequests)
+	curOut := idMap(resp.OutgoingRequests)
 
-	if r.primed {
-		r.diffOnce(resp.Friends, r.knownFriends, curF, "friend")
-		r.diffOnce(resp.IncomingRequests, r.knownIncoming, curIn, "incoming-request")
-		r.diffOnce(resp.OutgoingRequests, r.knownOutgoing, curOut, "outgoing-request")
+	if primed {
+		r.diffWithObserver(resp.Friends, prevFriends, curF, "friend", obs,
+			func(d api.FriendDto) { if obs != nil { obs.OnFriendAdded(d) } },
+			func(id uuid.UUID) { if obs != nil { obs.OnFriendRemoved(id) } })
+		r.diffWithObserver(resp.IncomingRequests, prevIncoming, curIn, "incoming-request", obs,
+			func(d api.FriendDto) { if obs != nil { obs.OnIncomingRequest(d) } },
+			func(id uuid.UUID) { if obs != nil { obs.OnIncomingResolved(id) } })
+		r.diffWithObserver(resp.OutgoingRequests, prevOutgoing, curOut, "outgoing-request", obs,
+			func(d api.FriendDto) { if obs != nil { obs.OnOutgoingRequest(d) } },
+			func(id uuid.UUID) { if obs != nil { obs.OnOutgoingResolved(id) } })
 	} else {
 		r.logger.Info("Initial friends snapshot",
 			"friends", len(curF),
 			"incoming", len(curIn),
 			"outgoing", len(curOut))
-		r.primed = true
+		if obs != nil {
+			obs.OnInitialSnapshot(resp)
+		}
 	}
 
-	if r.autoAccept {
+	if autoAccept {
 		for _, d := range resp.IncomingRequests {
 			id := d.ProfileID.UUID()
-			if _, seen := r.knownIncoming[id]; !seen {
+			if _, seen := prevIncoming[id]; !seen {
 				r.autoAcceptOne(d)
 			}
 		}
 	}
 
+	r.mu.Lock()
 	r.knownFriends = curF
 	r.knownIncoming = curIn
 	r.knownOutgoing = curOut
+	r.primed = true
+	r.mu.Unlock()
 }
 
 func (r *Refresher) autoAcceptOne(d api.FriendDto) {
@@ -136,15 +180,25 @@ func (r *Refresher) autoAcceptOne(d api.FriendDto) {
 	}
 }
 
-func (r *Refresher) diffOnce(current []api.FriendDto, known map[uuid.UUID]struct{}, currentIDs map[uuid.UUID]struct{}, label string) {
+func (r *Refresher) diffWithObserver(
+	current []api.FriendDto,
+	known map[uuid.UUID]api.FriendDto,
+	currentIDs map[uuid.UUID]api.FriendDto,
+	label string,
+	_ Observer,
+	onAdd func(api.FriendDto),
+	onRemove func(uuid.UUID),
+) {
 	for _, d := range current {
 		if _, ok := known[d.ProfileID.UUID()]; !ok {
 			r.logger.Info("[+]", "kind", label, "name", d.Name, "id", d.ProfileID.UUID())
+			onAdd(d)
 		}
 	}
 	for gone := range known {
 		if _, ok := currentIDs[gone]; !ok {
 			r.logger.Info("[-]", "kind", label, "id", gone)
+			onRemove(gone)
 		}
 	}
 }

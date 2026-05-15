@@ -47,6 +47,7 @@ func NewHostManager(sig *signaling.Client, target string, bypassKey []byte, logg
 		webrtc.NetworkTypeUDP4,
 		webrtc.NetworkTypeUDP6,
 	})
+	se.SetICETimeouts(3*time.Second, 8*time.Second, 1*time.Second)
 	api := webrtc.NewAPI(webrtc.WithSettingEngine(se))
 
 	pm := &HostManager{

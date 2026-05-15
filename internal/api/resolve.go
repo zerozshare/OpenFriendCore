@@ -48,6 +48,7 @@ func ResolvePeer(client *Client, query string) (*Peer, error) {
 		return nil, fmt.Errorf("no friend named %q (have %d friends)", query, len(friends.Friends))
 	}
 
+	client.ClearPresenceETag()
 	pres, err := client.PostPresence(PresenceRequest{
 		Status:   StatusOnline,
 		JoinInfo: nil,
@@ -68,6 +69,7 @@ func ResolvePeer(client *Client, query string) (*Peer, error) {
 }
 
 func resolveByPmid(client *Client, pmid uuid.UUID) (*Peer, error) {
+	client.ClearPresenceETag()
 	pres, err := client.PostPresence(PresenceRequest{
 		Status:   StatusOnline,
 		JoinInfo: nil,

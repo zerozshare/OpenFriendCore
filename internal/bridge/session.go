@@ -46,7 +46,11 @@ type Session struct {
 
 	dcOpenCh   chan struct{}
 	dcOpenOnce sync.Once
+
+	warmupRemaining int
 }
+
+const warmupMagic = "OFW0"
 
 func NewSession(api *webrtc.API, cfg webrtc.Configuration, role Role, sessionID string, peerPmid uuid.UUID,
 	onLocalICE func(*webrtc.ICECandidate),
@@ -96,10 +100,16 @@ func (s *Session) attachDataChannel(dc *webrtc.DataChannel) {
 	s.logger.Info("[rtc] DataChannel attached", "label", dc.Label(), "role", s.Role)
 	s.mu.Lock()
 	s.dc = dc
+	s.warmupRemaining = len(warmupMagic)
 	s.mu.Unlock()
 
 	dc.OnOpen(func() {
 		s.dcOpenOnce.Do(func() { close(s.dcOpenCh) })
+		if err := dc.Send([]byte(warmupMagic)); err != nil {
+			s.logger.Debug("[rtc] warmup send failed", "err", err)
+		} else {
+			s.logger.Debug("[rtc] warmup magic sent")
+		}
 	})
 	dc.OnClose(func() {
 		if s.onClose != nil {
@@ -107,8 +117,25 @@ func (s *Session) attachDataChannel(dc *webrtc.DataChannel) {
 		}
 	})
 	dc.OnMessage(func(msg webrtc.DataChannelMessage) {
+		data := msg.Data
+		s.mu.Lock()
+		remaining := s.warmupRemaining
+		s.mu.Unlock()
+		if remaining > 0 {
+			drop := remaining
+			if drop > len(data) {
+				drop = len(data)
+			}
+			s.mu.Lock()
+			s.warmupRemaining -= drop
+			s.mu.Unlock()
+			data = data[drop:]
+			if len(data) == 0 {
+				return
+			}
+		}
 		if s.onData != nil {
-			s.onData(msg.Data)
+			s.onData(data)
 		}
 	})
 	if dc.ReadyState() == webrtc.DataChannelStateOpen {

@@ -112,5 +112,4 @@ func (b *Broadcaster) Close() {
 	close(b.stop)
 	b.mu.Unlock()
 	<-b.done
-	b.AnnounceOffline()
 }

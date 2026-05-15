@@ -36,8 +36,11 @@ type Client struct {
 	mu                  sync.Mutex
 	presenceETag        string
 	friendsETag         string
+	presenceCache       *PresenceResponse
+	friendsCache        *FriendsListResponse
 	presenceCooldownEnd time.Time
 	friendsCooldownEnd  time.Time
+	cacheDir            string
 }
 
 func NewClient(tokens TokenProvider, logger *slog.Logger) *Client {
@@ -45,6 +48,12 @@ func NewClient(tokens TokenProvider, logger *slog.Logger) *Client {
 		logger = slog.Default()
 	}
 	return &Client{tokens: tokens, logger: logger}
+}
+
+func (c *Client) ClearPresenceETag() {
+	c.mu.Lock()
+	c.presenceETag = ""
+	c.mu.Unlock()
 }
 
 func (c *Client) PresenceInCooldown() bool {

@@ -49,6 +49,7 @@ func main() {
 		reset           bool
 		watchParent     bool
 		bypassKeyPath   string
+		ipcStdio        bool
 	)
 	flag.StringVar(&bypassKeyPath, "bypass-key", "", "path to bypass.pem (enables online-mode auth bypass)")
 	flag.BoolVar(&reset, "reset", false, "send OFFLINE, delete saved auth and skin state, then exit")
@@ -66,12 +67,13 @@ func main() {
 	flag.BoolVar(&verbose, "verbose", false, "verbose (debug) logging")
 	flag.StringVar(&joinTarget, "join", "", "join mode: friend name or pmid to join")
 	flag.StringVar(&listenAddr, "listen", "127.0.0.1:25565", "join mode: local TCP address for Minecraft client to connect to")
+	flag.BoolVar(&ipcStdio, "ipc-stdio", false, "stdio JSON-RPC mode (for the Mod / external UI shells)")
 	flag.Parse()
 
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, os.Interrupt, syscall.SIGTERM)
 
-	if watchParent {
+	if watchParent && !ipcStdio {
 		go watchStdinEOF(stop)
 	}
 
@@ -96,6 +98,10 @@ func main() {
 			dataDir = resolveDataDir()
 		}
 		authFile = filepath.Join(dataDir, "auth.pem")
+	}
+
+	if ipcStdio {
+		os.Exit(runIpcStdio(authFile, stop))
 	}
 
 	if reset {
