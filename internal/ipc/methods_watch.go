@@ -30,8 +30,18 @@ type watchState struct {
 	currentJoinVal *string
 	currentInvites []uuid.UUID
 
+	lastPostedStatus   api.PresenceStatus
+	lastPostedJoinVal  *string
+	lastPostedInvites  []uuid.UUID
+	lastPostedAt       time.Time
+
 	lastPresence map[uuid.UUID]string
 }
+
+const (
+	presenceMinInterval = 10 * time.Second
+	presenceMaxInterval = 60 * time.Second
+)
 
 func newWatchState() *watchState {
 	return &watchState{
@@ -287,15 +297,12 @@ func (h *Handlers) presenceWatch(_ context.Context, raw json.RawMessage) (any, *
 	return map[string]any{"running": true, "intervalSeconds": p.IntervalSeconds}, nil
 }
 
-func (h *Handlers) runPresenceWatch(interval time.Duration, stop, done chan struct{}) {
+func (h *Handlers) runPresenceWatch(_ time.Duration, stop, done chan struct{}) {
 	defer close(done)
 	h.presenceTickNow()
-	t := time.NewTicker(interval)
-	defer t.Stop()
+	tick := time.NewTicker(1 * time.Second)
+	defer tick.Stop()
 	for {
-		// If we're in cooldown from a recent 429, schedule a retry shortly
-		// after the cooldown expires so users don't wait for the next full
-		// interval tick.
 		var coolTimer <-chan time.Time
 		if remain := h.deps.APIClient.PresenceCooldownRemaining(); remain > 0 {
 			coolTimer = time.After(remain + 2*time.Second)
@@ -303,12 +310,35 @@ func (h *Handlers) runPresenceWatch(interval time.Duration, stop, done chan stru
 		select {
 		case <-stop:
 			return
-		case <-t.C:
-			h.presenceTickNow()
+		case <-tick.C:
+			h.presenceTickIfDue()
 		case <-coolTimer:
-			h.presenceTickNow()
+			h.presenceTickIfDue()
 		}
 	}
+}
+
+func (h *Handlers) presenceTickIfDue() {
+	h.watch.mu.Lock()
+	status := h.watch.currentStatus
+	joinVal := h.watch.currentJoinVal
+	invites := append([]uuid.UUID{}, h.watch.currentInvites...)
+	lastPostedAt := h.watch.lastPostedAt
+	dirty := presenceStateDiffers(status, joinVal, invites,
+		h.watch.lastPostedStatus, h.watch.lastPostedJoinVal, h.watch.lastPostedInvites)
+	h.watch.mu.Unlock()
+
+	elapsed := time.Since(lastPostedAt)
+	if lastPostedAt.IsZero() {
+		elapsed = presenceMaxInterval + time.Second
+	}
+	if elapsed < presenceMinInterval {
+		return
+	}
+	if !dirty && elapsed < presenceMaxInterval {
+		return
+	}
+	h.presenceTickNow()
 }
 
 func (h *Handlers) presenceTickNow() {
@@ -329,9 +359,43 @@ func (h *Handlers) presenceTickNow() {
 	if err != nil {
 		return
 	}
+
+	h.watch.mu.Lock()
+	h.watch.lastPostedStatus = status
+	h.watch.lastPostedJoinVal = joinVal
+	h.watch.lastPostedInvites = invites
+	h.watch.lastPostedAt = time.Now()
+	h.watch.mu.Unlock()
+
 	if resp != nil {
 		h.emitPresenceChanges(resp)
 	}
+}
+
+func presenceStateDiffers(curStatus api.PresenceStatus, curJoinVal *string, curInvites []uuid.UUID,
+	prevStatus api.PresenceStatus, prevJoinVal *string, prevInvites []uuid.UUID) bool {
+	if curStatus != prevStatus {
+		return true
+	}
+	if (curJoinVal == nil) != (prevJoinVal == nil) {
+		return true
+	}
+	if curJoinVal != nil && prevJoinVal != nil && *curJoinVal != *prevJoinVal {
+		return true
+	}
+	if len(curInvites) != len(prevInvites) {
+		return true
+	}
+	prevSet := make(map[uuid.UUID]struct{}, len(prevInvites))
+	for _, id := range prevInvites {
+		prevSet[id] = struct{}{}
+	}
+	for _, id := range curInvites {
+		if _, ok := prevSet[id]; !ok {
+			return true
+		}
+	}
+	return false
 }
 
 func (h *Handlers) presenceUnwatch(_ context.Context, _ json.RawMessage) (any, *RPCError) {

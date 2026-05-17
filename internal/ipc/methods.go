@@ -325,16 +325,16 @@ func friendActionRPCError(err error) *RPCError {
 			case strings.Contains(body, "does not have friends enabled") ||
 				strings.Contains(body, "accept invites"):
 				return newError(CodeAPIError,
-					"That player hasn't opted into the Minecraft Friends List. Ask them to launch the snapshot 26.2 client at least once to opt in, or to send you the invite from the Xbox app.")
+					"Xbox account privacy settings may need to be adjusted on the other side.")
 			case strings.Contains(body, "privacy"):
 				return newError(CodeAPIError,
-					"Blocked by Xbox Live privacy. Their (or your) Xbox account is set to 'block friend requests'. Adjust at https://account.xbox.com/Settings.")
+					"Blocked by Xbox Live privacy settings.")
 			case strings.Contains(body, "blocked"):
 				return newError(CodeAPIError,
-					"Blocked. One side has the other on their Xbox block list.")
+					"Blocked by Xbox block list.")
 			default:
 				return newError(CodeAPIError,
-					"Mojang refused the request (403). Often this means the other player hasn't enabled Friends List, or Xbox privacy blocks the invite. Detail: "+apiErr.Body)
+					"Mojang refused the request (403).")
 			}
 		case 404:
 			return newError(CodeAPIError, "Player not found. Check the gamertag.")
